@@ -60,7 +60,7 @@ class ContinuousTEPAI:
     @property
     def expected_gate_count(self) -> float:
         return self._Lambda
-
+        
     @property
     def p_delta(self) -> float:
         return self._p_delta
@@ -196,7 +196,7 @@ class ContinuousTEPAI:
 
         return circuits
 
-    def _build_time_cdf(self, num_points: int = 201) -> tuple[np.ndarray, np.ndarray]:
+    def _build_time_cdf(self, num_points: int = 4001) -> tuple[np.ndarray, np.ndarray]:
         T = self._total_time
         ts = np.linspace(0, T, num_points)
         densities = np.array([self._ham.l1_norm(t) for t in ts])
