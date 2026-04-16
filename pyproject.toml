@@ -20,6 +20,10 @@ qiskit = [
 qulacs = [
     "qulacs>=0.6.13",
 ]
+mps = [
+    "quimb>=1.8",
+    "autoray>=0.6",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.6,<0.12.0"]

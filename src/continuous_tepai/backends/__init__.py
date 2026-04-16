@@ -25,7 +25,10 @@ def __getattr__(name: str):
     if name == "QulacsBackend":
         from .qulacs_backend import QulacsBackend
         return QulacsBackend
+    if name == "MPSBackend":
+        from .mps_backend import MPSBackend
+        return MPSBackend
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["Backend", "QiskitBackend", "QulacsBackend"]
+__all__ = ["Backend", "QiskitBackend", "QulacsBackend", "MPSBackend"]
