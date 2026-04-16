@@ -1,4 +1,21 @@
-"""Built-in backends for Continuous TE-PAI."""
+from __future__ import annotations
+from typing import Protocol, Sequence, runtime_checkable
+
+from ..hamiltonian import PauliString
+from ..te_pai import PauliRotation
+
+
+@runtime_checkable
+class Backend(Protocol):
+    def expectation(
+        self,
+        rotations: Sequence[PauliRotation],
+        observable: PauliString,
+        num_qubits: int,
+        *,
+        shots: int | None = None,
+        initial_state: str = "zero",
+    ) -> float: ...
 
 
 def __getattr__(name: str):
@@ -11,4 +28,4 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["QiskitBackend", "QulacsBackend"]
+__all__ = ["Backend", "QiskitBackend", "QulacsBackend"]
