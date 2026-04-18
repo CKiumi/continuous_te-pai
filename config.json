@@ -1,68 +1,31 @@
 {
   "defaults": {
-    "n_qubits": 10,
+    "n_qubits": 6,
     "j": 0.1,
     "time_dependent": false,
-    "total_time": 0.5,
-    "dt": 0.1,
+    "total_time": 2,
+    "dt": 0.2,
     "observable": "X0",
-    "initial_state": "zeros",
+    "initial_state": "plus",
     "seed": 0,
-    "backend": "qulacs",
-    "max_bond": null,
+    "backend": "mps",
+    "max_bond": 16,
     "hamiltonian": "spin_chain",
-    "N": 100,
+    "N": 2000,
     "trotter_order": 1,
     "depth": 1,
-    "pi_over_delta": 64,
-    "n_circuits": 32,
+    "pi_over_delta": 128,
+    "n_circuits": 1000,
     "tepai_start_time": 0.0
   },
-
   "experiments": [
     {
-      "name": "trotter_baseline",
-      "active": false,
-      "type": "trotter",
-      "note": "Basic first-order Trotter reference on 10 qubits, statevector"
-    },
-    {
-      "name": "trotter_adaptive",
-      "active": false,
-      "type": "trotter",
-      "note": "Quadratic-depth adaptive Trotter for better late-time accuracy",
-      "N": 200,
-      "depth": 2
-    },
-    {
-      "name": "tepai_sv_small",
-      "active": false,
-      "type": "tepai",
-      "note": "Continuous TE-PAI with Qulacs statevector on 10 qubits",
-      "pi_over_delta": 64,
-      "n_circuits": 64
-    },
-    {
-      "name": "tepai_mps_50q",
-      "active": false,
-      "type": "tepai",
-      "note": "Continuous TE-PAI with MPS backend on 50 qubits",
-      "n_qubits": 50,
-      "backend": "mps",
-      "max_bond": 16,
-      "pi_over_delta": 1024,
-      "n_circuits": 100
-    },
-    {
-      "name": "trotter_mps_50q",
-      "active": false,
-      "type": "trotter",
-      "note": "MPS Trotter reference for 50 qubits with bond dim 16",
-      "n_qubits": 50,
-      "backend": "mps",
-      "max_bond": 16,
-      "N": 500,
-      "depth": 2
+      "name": "snapshot_6q",
+      "active": true,
+      "time_dependent": true,
+      "j": 100,
+      "type": "snapshot",
+      "note": "Replicates snapshot.ipynb: 6-qubit spin chain, J(t)=cos(100πt)"
     }
   ]
 }

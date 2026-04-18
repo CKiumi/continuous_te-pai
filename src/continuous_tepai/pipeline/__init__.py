@@ -11,6 +11,7 @@ from .cache import (
     is_cached,
 )
 from .experiment import run_experiment, get_backend, build_hamiltonian, parse_observable
+from .trotter import build_trotter_rotations
 
 __all__ = [
     "load_config",
@@ -27,4 +28,5 @@ __all__ = [
     "get_backend",
     "build_hamiltonian",
     "parse_observable",
+    "build_trotter_rotations",
 ]

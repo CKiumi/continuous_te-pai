@@ -7,8 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+import warnings
+
 import numpy as np
 from scipy import integrate
+from scipy.integrate import IntegrationWarning
 
 # A coefficient function  c_k : [0, T] → ℝ
 CoefficientFn = Callable[[float], float]
@@ -95,7 +98,9 @@ class Hamiltonian:
 
     def l1_norm_avg(self, T: float, *, quad_points: int = 201) -> float:
         r"""Time-averaged ℓ₁-norm:  (1/T) ∫_0^T ‖c(t)‖_1 dt."""
-        val, _ = integrate.quad(self.l1_norm, 0.0, T, limit=quad_points)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", IntegrationWarning)
+            val, _ = integrate.quad(self.l1_norm, 0.0, T, limit=quad_points)
         return val / T
 
     @classmethod

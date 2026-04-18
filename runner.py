@@ -82,9 +82,9 @@ def main(argv: list[str] | None = None) -> None:
             log.info("  ✓ Cached data found — skipping computation.")
             if args.dry_run:
                 continue
-            # Optionally load and display summary
-            metadata, arrays = load_results(params)
-            _log_summary(arrays)
+            if exp_type != "snapshot":
+                metadata, arrays = load_results(params)
+                _log_summary(arrays)
             continue
 
         if args.dry_run:
@@ -105,13 +105,16 @@ def main(argv: list[str] | None = None) -> None:
         elapsed = time.perf_counter() - t0
         log.info("  Done in %.1f s.", elapsed)
 
-        # Save results
-        saved_path = save_results(params, **arrays)
-        log.info("  Saved to %s", saved_path)
-
-        # Write data_path back into config
-        set_data_path(config, name, str(saved_path), args.config)
-        log.info("  Updated config with data_path.")
+        # Save results (snapshot saves its components internally in run_snapshot)
+        if exp_type != "snapshot":
+            saved_path = save_results(
+                params,
+                columns=list(arrays.keys()),
+                arrays=list(arrays.values()),
+            )
+            log.info("  Saved to %s", saved_path)
+            set_data_path(config, name, str(saved_path), args.config)
+            log.info("  Updated config with data_path.")
 
         _log_summary(arrays)
 

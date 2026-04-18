@@ -1,27 +1,33 @@
-"""Data path generation and .npz caching.
+"""Data path generation and CSV caching.
 
 Folder layout::
 
     Data/
     └── q{n}_J{j}_td{0|1}_T{T}_dT{dT}_{obs}_{init}/
-        ├── trotter{order}_N{N}_depth{depth}[_chi{chi}].npz
-        └── tepai_d{d}_S{n_circuits}_tstart{tstart}[_chi{chi}].npz
+        ├── trotter{order}_N{N}_depth{depth}[_chi{chi}].csv
+        └── tepai_d{d}_S{n_circuits}_tstart{tstart}[_chi{chi}].csv
+
+For ``snapshot`` experiments both files are written independently, so
+altering only Trotter or only TE-PAI parameters triggers only the
+affected component to recompute on the next run.
 
 The folder captures physics parameters shared by all simulations in it
 (system size, coupling, observable, etc.).  The filename encodes the
 method-specific parameters (Trotter steps, TE-PAI delta exponent, …).
 
-Each ``.npz`` file contains arbitrary numpy arrays (``times``,
-``expectation_values``, ``raw_estimates``, …) plus a JSON-encoded
-``_metadata`` entry with the full parameter dict.
+Each ``.csv`` file begins with ``# key=value`` metadata header lines
+(one per parameter), followed by a single CSV header row and one row
+per snapshot.  The metadata header is used on load to detect stale
+caches — if the cached metadata disagrees with the requested
+parameters, the run is repeated from scratch.
 """
 
 from __future__ import annotations
 
-import json
 import math
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
@@ -69,7 +75,7 @@ def experiment_folder_name(params: dict[str, Any]) -> str:
 def trotter_filename(params: dict[str, Any]) -> str:
     """Build the Trotter data filename.
 
-    Format: ``trotter{order}_N{N}_depth{depth}[_chi{chi}].npz``
+    Format: ``trotter{order}_N{N}_depth{depth}[_chi{chi}].csv``
 
     *chi* is included only when ``max_bond`` is set (tensor-network run).
     """
@@ -81,13 +87,13 @@ def trotter_filename(params: dict[str, Any]) -> str:
     name = f"trotter{order}_N{N}_depth{depth}"
     if chi is not None:
         name += f"_chi{chi}"
-    return name + ".npz"
+    return name + ".csv"
 
 
 def tepai_filename(params: dict[str, Any]) -> str:
     r"""Build the TE-PAI data filename.
 
-    Format: ``tepai_d{d}_S{n_circuits}_tstart{tstart}[_chi{chi}].npz``
+    Format: ``tepai_d{d}_S{n_circuits}_tstart{tstart}[_chi{chi}].csv``
 
     *d* is the integer such that Δ = π / 2^d (so ``pi_over_delta = 2^d``).
     *chi* is included only for tensor-network (MPS) runs.
@@ -109,7 +115,7 @@ def tepai_filename(params: dict[str, Any]) -> str:
     name = f"tepai_d{d}_S{n_circuits}_tstart{_fmt(tstart)}"
     if chi is not None:
         name += f"_chi{chi}"
-    return name + ".npz"
+    return name + ".csv"
 
 
 # ── full path resolution ────────────────────────────────────────────────
@@ -119,10 +125,14 @@ def resolve_data_path(params: dict[str, Any]) -> Path:
 
     Combines :func:`experiment_folder_name` with the method-specific
     filename (Trotter or TE-PAI).
+
+    For ``snapshot`` experiments the Trotter component path is returned
+    for display/logging purposes; use :func:`is_cached` to check whether
+    both components exist.
     """
     folder = experiment_folder_name(params)
     exp_type = params.get("type", "")
-    if exp_type == "trotter":
+    if exp_type in ("trotter", "snapshot"):
         fname = trotter_filename(params)
     elif exp_type == "tepai":
         fname = tepai_filename(params)
@@ -131,74 +141,149 @@ def resolve_data_path(params: dict[str, Any]) -> Path:
     return DATA_ROOT / folder / fname
 
 
+def resolve_data_folder(params: dict[str, Any]) -> Path:
+    """Return the data folder for *params* (no filename)."""
+    return DATA_ROOT / experiment_folder_name(params)
+
+
 def is_cached(params: dict[str, Any]) -> bool:
-    """Return True if cached data exists on disk for *params*."""
+    """Return True if cached data exists on disk for *params*.
+
+    For ``snapshot`` experiments both the Trotter and TE-PAI component
+    files must exist for the result to be considered fully cached.
+    """
+    if params.get("type") == "snapshot":
+        trotter_path = resolve_data_path({**params, "type": "trotter"})
+        tepai_path = resolve_data_path({**params, "type": "tepai"})
+        return trotter_path.exists() and tepai_path.exists()
     return resolve_data_path(params).exists()
 
 
-# ── .npz I/O ────────────────────────────────────────────────────────────
+# ── CSV I/O ─────────────────────────────────────────────────────────────
 
-def _metadata_to_array(metadata: dict[str, Any]) -> np.ndarray:
-    """Encode *metadata* as a rank-0 numpy string array for ``.npz`` storage."""
-    return np.array(json.dumps(metadata, default=str))
+def save_csv(
+    path: str | Path,
+    metadata: dict[str, Any],
+    columns: Sequence[str],
+    arrays: Sequence[Iterable[float]],
+) -> Path:
+    """Write a CSV with ``# key=value`` header lines.
+
+    Parameters
+    ----------
+    path :
+        Destination file path.  Parent directory is created as needed.
+    metadata :
+        Dict of parameters to embed as header comments.  Values are
+        stringified via ``str()``.
+    columns :
+        Column names for the CSV body.
+    arrays :
+        One iterable per column; all must have the same length.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        for k, v in metadata.items():
+            f.write(f"# {k}={v}\n")
+        f.write(",".join(columns) + "\n")
+        for row in zip(*arrays, strict=True):
+            f.write(",".join(f"{v}" for v in row) + "\n")
+    return path
 
 
-def _metadata_from_array(arr: np.ndarray) -> dict[str, Any]:
-    """Decode a metadata array written by :func:`_metadata_to_array`."""
-    return json.loads(str(arr))
+def load_csv(path: str | Path) -> tuple[dict[str, str], dict[str, np.ndarray]]:
+    """Read a CSV written by :func:`save_csv`.
 
+    Returns ``(metadata, {col_name: np.array})``.  Metadata values are
+    always returned as strings — use :func:`check_metadata` for typed
+    comparison.
+    """
+    meta: dict[str, str] = {}
+    header: list[str] | None = None
+    rows: list[list[float]] = []
+    with open(path) as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            if line.startswith("#"):
+                body = line[1:].strip()
+                if "=" in body:
+                    k, v = body.split("=", 1)
+                    meta[k.strip()] = v.strip()
+            elif header is None:
+                header = [c.strip() for c in line.split(",")]
+            else:
+                rows.append([float(x) for x in line.split(",")])
+    if header is None:
+        raise ValueError(f"No CSV header found in {path}")
+    arr = np.array(rows) if rows else np.empty((0, len(header)))
+    data = {col: arr[:, i] for i, col in enumerate(header)}
+    return meta, data
+
+
+def check_metadata(
+    cached: dict[str, str],
+    expected: dict[str, Any],
+) -> list[tuple[str, str, Any]]:
+    """Return a list of ``(key, cached_value, expected_value)`` mismatches.
+
+    Values are compared as floats first (rounded to 10 decimal places to
+    absorb repr noise) and fall back to string equality otherwise.  Keys
+    missing from *cached* are reported with cached value ``"<missing>"``.
+    """
+    mismatches: list[tuple[str, str, Any]] = []
+    for key, want in expected.items():
+        got = cached.get(key)
+        if got is None:
+            mismatches.append((key, "<missing>", want))
+            continue
+        try:
+            g = float(got)
+            w = float(want)
+            if round(g, 10) != round(w, 10):
+                mismatches.append((key, got, want))
+        except (ValueError, TypeError):
+            if str(got) != str(want):
+                mismatches.append((key, got, want))
+    return mismatches
+
+
+# ── experiment-level convenience ────────────────────────────────────────
 
 def save_results(
     params: dict[str, Any],
     *,
+    columns: Sequence[str],
+    arrays: Sequence[Iterable[float]],
     metadata: dict[str, Any] | None = None,
-    **arrays: np.ndarray,
 ) -> Path:
-    """Save experiment results as a ``.npz`` file.
+    """Save experiment results as a CSV in the canonical data path.
 
     Parameters
     ----------
     params :
         Merged parameter dict — used to compute the data path.
+    columns :
+        Column names for the CSV body.
+    arrays :
+        One iterable per column.
     metadata :
-        Extra metadata to embed inside the file.  When *None*, the full
-        *params* dict is used as metadata.
-    **arrays :
-        Named numpy arrays to persist (``times``, ``expectation_values``, …).
-
-    Returns
-    -------
-    Path
-        The relative path where the file was written.
+        Header metadata.  When *None*, ``params`` itself is used.
     """
     path = resolve_data_path(params)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
     if metadata is None:
         metadata = params
-
-    np.savez(
-        path,
-        _metadata=_metadata_to_array(metadata),
-        **arrays,
-    )
-    return path
+    return save_csv(path, metadata, columns, arrays)
 
 
-def load_results(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """Load cached results from a ``.npz`` file.
+def load_results(
+    params: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, np.ndarray]]:
+    """Load cached CSV results for *params*.
 
-    Parameters
-    ----------
-    params :
-        Merged parameter dict — used to compute the data path.
-
-    Returns
-    -------
-    metadata :
-        The metadata dict embedded at save time.
-    arrays :
-        Dict mapping array names to numpy arrays.
+    Returns ``(metadata, {col: np.array})``.
 
     Raises
     ------
@@ -208,8 +293,4 @@ def load_results(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, np.n
     path = resolve_data_path(params)
     if not path.exists():
         raise FileNotFoundError(f"No cached data at {path}")
-
-    data = np.load(path, allow_pickle=True)
-    metadata = _metadata_from_array(data["_metadata"])
-    arrays = {k: data[k] for k in data.files if k != "_metadata"}
-    return metadata, arrays
+    return load_csv(path)

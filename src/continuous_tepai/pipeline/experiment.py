@@ -7,24 +7,60 @@ This module wires config parameters to the ``continuous_tepai`` API:
 * :func:`get_backend` — instantiates the right backend class.
 * :func:`run_experiment` — main entry point called by ``runner.py``.
 
-Experiment type implementations (``run_trotter``, ``run_tepai``) are stubs
-that will be filled in during the numerics phase.  The pipeline framework
-(config → cache check → dispatch → save → update config) is fully
-functional around them.
+Three experiment types are supported:
+
+``"trotter"``
+    First-order Trotterized time evolution with snapshot measurements.
+
+``"tepai"``
+    Continuous TE-PAI estimation at each snapshot time.
+
+``"snapshot"``
+    Combined Trotter + TE-PAI run with a comparison PDF plot, replicating
+    the workflow of ``examples/snapshot.ipynb``.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import multiprocessing as mp
+import os
+import platform
 from itertools import product
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from ..hamiltonian import Hamiltonian, PauliString
+from ..circuit import PauliRotation
 
 log = logging.getLogger(__name__)
+
+# ── multiprocessing ──────────────────────────────────────────────────────
+
+# Process-local backend instance set by _mp_init_backend.
+_worker_backend = None
+
+
+def _worker_count() -> int:
+    """10 workers on macOS; all available CPUs on Linux."""
+    if platform.system() == "Darwin":
+        return 10
+    return os.cpu_count() or 1
+
+
+def _mp_init_backend(backend_params: dict) -> None:
+    """Pool initializer: create one backend per worker process."""
+    global _worker_backend
+    _worker_backend = get_backend(backend_params)
+
+
+def _mp_eval_circuit(args: tuple) -> float:
+    """Pool worker: evaluate one circuit on the process-local backend."""
+    rotations, obs, n, init = args
+    return _worker_backend.expectation(rotations, obs, n, initial_state=init)
 
 
 # ── helpers ─────────────────────────────────────────────────────────────
@@ -35,10 +71,13 @@ def parse_observable(obs_str: str, n_qubits: int) -> PauliString:
     Format: ``"{P}{q}"`` where *P* is one of ``X``, ``Y``, ``Z`` and *q*
     is the (zero-based) qubit index.
 
-    Example: ``parse_observable("X0", 4)`` → ``PauliString("IIIX")``
+    Example: ``parse_observable("X0", 4)`` → ``PauliString("XIII")``
 
-    The codebase uses big-endian labels: ``label[i]`` acts on qubit
-    ``n − 1 − i``, so qubit 0 occupies the *rightmost* character.
+    Matches :meth:`Hamiltonian.from_local_terms`, which places the qubit
+    at index ``q`` in the label at position ``label[q]``.  All three
+    backends (Qulacs, Qiskit, MPS) then map ``label[i]`` to physical
+    qubit ``n - 1 - i`` internally, so the observable and Hamiltonian
+    stay on the same physical qubit regardless of backend.
     """
     if len(obs_str) < 2:
         raise ValueError(f"Observable string too short: {obs_str!r}")
@@ -53,7 +92,7 @@ def parse_observable(obs_str: str, n_qubits: int) -> PauliString:
             f"Qubit index {qubit} out of range for {n_qubits}-qubit system"
         )
     label = ["I"] * n_qubits
-    label[n_qubits - 1 - qubit] = pauli_char  # big-endian convention
+    label[qubit] = pauli_char  # match from_local_terms convention
     return PauliString("".join(label))
 
 
@@ -92,16 +131,18 @@ def get_backend(params: dict[str, Any]):
 
 
 def build_hamiltonian(params: dict[str, Any]) -> Hamiltonian:
-    """Build a :class:`Hamiltonian` from config parameters.
+    r"""Build a :class:`Hamiltonian` from config parameters.
 
-    Currently supports ``"spin_chain"`` — the transverse-field Ising /
-    Heisenberg chain::
+    Currently supports ``"spin_chain"`` — the Heisenberg-like chain::
 
         H(t) = J(t) Σ_{k} (XX + YY + ZZ)_{k,k+1}  +  Σ_k freq_k · Z_k
 
     where ``J(t)`` is constant (``j``) when ``time_dependent`` is false,
-    and ``cos(j · π · t)`` when true.  Site frequencies are drawn from
-    ``Uniform(-1, 1)`` with the given ``seed``.
+    and ``cos(j · π · t)`` when true.
+
+    Site frequencies are drawn from ``Uniform(-1, 1)`` with the given
+    ``seed``, unless ``freqs_csv`` points to a CSV file of pre-defined
+    frequencies (first ``n_qubits`` rows are used).
     """
     ham_type = params.get("hamiltonian", "spin_chain")
     n = params["n_qubits"]
@@ -115,8 +156,14 @@ def build_hamiltonian(params: dict[str, Any]) -> Hamiltonian:
             "Currently supported: 'spin_chain'."
         )
 
-    rng = np.random.default_rng(seed)
-    freqs = rng.uniform(-1, 1, size=n)
+    # Frequencies: from CSV or random
+    freqs_csv = params.get("freqs_csv")
+    if freqs_csv is not None:
+        all_freqs = np.loadtxt(freqs_csv, delimiter=",")
+        freqs = all_freqs[:n].astype(float)
+    else:
+        rng = np.random.default_rng(seed)
+        freqs = rng.uniform(-1, 1, size=n)
 
     if td:
         def J(t, _j=j):
@@ -136,70 +183,240 @@ def build_hamiltonian(params: dict[str, Any]) -> Hamiltonian:
     return Hamiltonian.from_local_terms(n, terms)
 
 
-# ── experiment type implementations (stubs) ─────────────────────────────
+# ── experiment runners ──────────────────────────────────────────────────
 
 def run_trotter(params: dict[str, Any]) -> dict[str, np.ndarray]:
     """Run a Trotterized time-evolution experiment.
 
-    **Not yet implemented.**  When filled in this function should:
+    Constructs Trotter rotations, executes them on the chosen backend,
+    and returns snapshot measurements.
 
-    1.  Build the Hamiltonian via :func:`build_hamiltonian`.
-    2.  Construct Trotter circuits of the requested order / depth.
-    3.  Evaluate the observable at each snapshot time ``[0, dT, 2·dT, …, T]``.
-    4.  Return ``{"times": …, "expectation_values": …}`` as numpy arrays.
-
-    Parameters
-    ----------
-    params : dict
-        Merged parameter dict.  Relevant keys:
-
-        * ``n_qubits``, ``j``, ``time_dependent``, ``hamiltonian``, ``seed``
-        * ``total_time``, ``dt``
-        * ``N`` — Trotter step count
-        * ``trotter_order`` — 1 (first-order) or 2 (second-order)
-        * ``depth`` — 1 (linear step count) or 2 (adaptive quadratic)
-        * ``backend``, ``max_bond``
-        * ``observable``, ``initial_state``
+    Returns ``{"times": …, "expectation_values": …}``.
     """
-    raise NotImplementedError(
-        "Trotter experiment runner not yet implemented.  "
-        "This stub will be filled in during the numerics phase."
+    from .trotter import (
+        build_trotter_rotations,
+        execute_trotter_mps,
+        execute_trotter_generic,
     )
+
+    ham = build_hamiltonian(params)
+    n = params["n_qubits"]
+    T = params["total_time"]
+    dt = params["dt"]
+    N = params["N"]
+    depth = params.get("depth", 1)
+    init = normalize_initial_state(params["initial_state"])
+    obs = parse_observable(params["observable"], n)
+    backend_name = params.get("backend", "qulacs")
+
+    n_snapshots = round(T / dt)
+    snap_times = np.linspace(0, T, n_snapshots + 1)
+
+    log.info(
+        "    Trotter: N=%d, depth=%d, n_snap=%d, backend=%s",
+        N, depth, n_snapshots, backend_name,
+    )
+
+    rots = build_trotter_rotations(ham, T, N, n_snapshots, depth=depth)
+
+    if backend_name == "mps":
+        evs = execute_trotter_mps(
+            rots, obs, n, init,
+            max_bond=params.get("max_bond"),
+        )
+    else:
+        backend = get_backend(params)
+        evs = execute_trotter_generic(rots, obs, n, init, backend)
+
+    return {"times": snap_times, "expectation_values": evs}
 
 
 def run_tepai(params: dict[str, Any]) -> dict[str, np.ndarray]:
     """Run a Continuous TE-PAI experiment.
 
-    **Not yet implemented.**  When filled in this function should:
+    For each snapshot time, creates a :class:`ContinuousTEPAI` sampler,
+    draws ``n_circuits`` circuits, evaluates weighted expectations,
+    and returns the mean estimator with standard errors.
 
-    1.  Build the Hamiltonian via :func:`build_hamiltonian`.
-    2.  For each snapshot time in ``[dT, 2·dT, …, T]``:
-        a.  Create a :class:`ContinuousTEPAI` sampler with
-            ``delta = π / pi_over_delta`` and ``total_time = t``.
-        b.  Sample ``n_circuits`` circuits.
-        c.  Evaluate each circuit on the chosen backend.
-        d.  Compute the weighted mean estimator for ⟨O(t)⟩.
-    3.  Prepend the ``t = 0`` value (bare initial-state expectation).
-    4.  Return ``{"times": …, "expectation_values": …,
-        "raw_estimates": …}`` as numpy arrays.
-
-    Parameters
-    ----------
-    params : dict
-        Merged parameter dict.  Relevant keys:
-
-        * ``n_qubits``, ``j``, ``time_dependent``, ``hamiltonian``, ``seed``
-        * ``total_time``, ``dt``
-        * ``pi_over_delta`` — integer 2^d giving Δ = π / 2^d
-        * ``n_circuits`` — number of sampled circuits per snapshot
-        * ``tepai_start_time`` — for future hybrid Trotter+TE-PAI support
-        * ``backend``, ``max_bond``
-        * ``observable``, ``initial_state``
+    Returns ``{"times": …, "expectation_values": …, "std_errors": …}``.
     """
-    raise NotImplementedError(
-        "TE-PAI experiment runner not yet implemented.  "
-        "This stub will be filled in during the numerics phase."
+    from ..te_pai import ContinuousTEPAI
+
+    ham = build_hamiltonian(params)
+    n = params["n_qubits"]
+    T = params["total_time"]
+    dt = params["dt"]
+    pod = params["pi_over_delta"]
+    delta = np.pi / pod
+    n_circuits = params.get("n_circuits", 32)
+    seed = params.get("seed", 0)
+    init = normalize_initial_state(params["initial_state"])
+    obs = parse_observable(params["observable"], n)
+    backend_name = params.get("backend", "qulacs")
+    use_mp = backend_name == "mps"
+
+    n_snapshots = round(T / dt)
+    snap_times = np.linspace(0, T, n_snapshots + 1)
+
+    if use_mp:
+        n_workers = _worker_count()
+        log.info(
+            "    TE-PAI: Δ=π/%d, N_s=%d, n_snap=%d, backend=%s, workers=%d",
+            pod, n_circuits, n_snapshots, backend_name, n_workers,
+        )
+        ctx = mp.get_context("spawn" if platform.system() == "Darwin" else "fork")
+        pool = ctx.Pool(
+            n_workers,
+            initializer=_mp_init_backend,
+            initargs=(params,),
+        )
+    else:
+        log.info(
+            "    TE-PAI: Δ=π/%d, N_s=%d, n_snap=%d, backend=%s",
+            pod, n_circuits, n_snapshots, backend_name,
+        )
+        backend = get_backend(params)
+
+    # t = 0 measurement (no evolution)
+    if use_mp:
+        ev0 = pool.apply(_mp_eval_circuit, args=(([], obs, n, init),))
+    else:
+        ev0 = backend.expectation([], obs, n, initial_state=init)
+    means = [ev0]
+    stds = [0.0]
+
+    try:
+        for i, t_snap in enumerate(snap_times[1:], start=1):
+            sampler = ContinuousTEPAI(
+                ham, delta=delta, total_time=t_snap, seed=seed + i,
+            )
+            circuits = sampler.sample_circuits(n_circuits)
+
+            if use_mp:
+                tasks = [(c.rotations, obs, n, init) for c in circuits]
+                raw = pool.map(_mp_eval_circuit, tasks)
+                values = np.array([c.weight * v for c, v in zip(circuits, raw)])
+            else:
+                values = np.array([
+                    c.weight * backend.expectation(
+                        c.rotations, obs, n, initial_state=init,
+                    )
+                    for c in circuits
+                ])
+
+            means.append(float(np.mean(values)))
+            stds.append(float(np.std(values, ddof=1) / np.sqrt(n_circuits)))
+
+            log.info(
+                "      snap %d/%d (T=%.2f): ⟨O⟩ = %.4f ± %.4f",
+                i, n_snapshots, t_snap, means[-1], stds[-1],
+            )
+    finally:
+        if use_mp:
+            pool.close()
+            pool.join()
+
+    return {
+        "times": snap_times,
+        "expectation_values": np.array(means),
+        "std_errors": np.array(stds),
+    }
+
+
+def run_snapshot(params: dict[str, Any]) -> dict[str, np.ndarray]:
+    """Run a combined Trotter + TE-PAI experiment and produce a PDF plot.
+
+    This replicates the workflow of ``examples/snapshot.ipynb``:
+
+    1. Trotter evolution as the reference curve.
+    2. Continuous TE-PAI as the estimate with error bars.
+    3. Comparison plot saved as PDF in the data folder.
+
+    Each component is cached independently: if only Trotter or only
+    TE-PAI parameters change, only the affected component is recomputed.
+
+    Returns ``{"times": …, "trotter_values": …, "tepai_mean": …,
+    "tepai_std": …}``.
+    """
+    from .cache import (
+        experiment_folder_name, DATA_ROOT,
+        resolve_data_path, is_cached, save_results, load_results,
     )
+    from .plotting import snapshot_comparison_plot
+
+    trotter_params = {**params, "type": "trotter"}
+    tepai_params = {**params, "type": "tepai"}
+
+    # ── Trotter: load from cache or run + save ────────────────────
+    if resolve_data_path(trotter_params).exists():
+        log.info("    [snapshot] Loading cached Trotter data …")
+        _, trotter_data = load_results(trotter_params)
+        trotter_out = {
+            "times": trotter_data["times"],
+            "expectation_values": trotter_data["expectation_values"],
+        }
+    else:
+        log.info("    [snapshot] Running Trotter reference …")
+        trotter_out = run_trotter(params)
+        save_results(
+            trotter_params,
+            columns=["times", "expectation_values"],
+            arrays=[trotter_out["times"], trotter_out["expectation_values"]],
+        )
+        log.info("    [snapshot] Trotter data saved.")
+
+    # ── TE-PAI: load from cache or run + save ─────────────────────
+    if resolve_data_path(tepai_params).exists():
+        log.info("    [snapshot] Loading cached TE-PAI data …")
+        _, tepai_data = load_results(tepai_params)
+        tepai_out = {
+            "times": tepai_data["times"],
+            "expectation_values": tepai_data["expectation_values"],
+            "std_errors": tepai_data["std_errors"],
+        }
+    else:
+        log.info("    [snapshot] Running TE-PAI estimate …")
+        tepai_out = run_tepai(params)
+        save_results(
+            tepai_params,
+            columns=["times", "expectation_values", "std_errors"],
+            arrays=[
+                tepai_out["times"],
+                tepai_out["expectation_values"],
+                tepai_out["std_errors"],
+            ],
+        )
+        log.info("    [snapshot] TE-PAI data saved.")
+
+    times = trotter_out["times"]
+    trotter_vals = trotter_out["expectation_values"]
+    tepai_mean = tepai_out["expectation_values"]
+    tepai_std = tepai_out["std_errors"]
+
+    # ── generate PDF plot ─────────────────────────────────────────
+    exp_name = params.get("name", "snapshot")
+    folder = DATA_ROOT / experiment_folder_name(params)
+    folder.mkdir(parents=True, exist_ok=True)
+    plot_path = folder / f"{exp_name}.pdf"
+
+    snapshot_comparison_plot(
+        times,
+        trotter_vals,
+        tepai_mean,
+        tepai_std,
+        n_qubits=params["n_qubits"],
+        observable_str=params["observable"],
+        n_circuits=params.get("n_circuits"),
+        output_path=plot_path,
+    )
+    log.info("    [snapshot] Plot saved to %s", plot_path)
+
+    return {
+        "times": times,
+        "trotter_values": trotter_vals,
+        "tepai_mean": tepai_mean,
+        "tepai_std": tepai_std,
+    }
 
 
 # ── main dispatch ───────────────────────────────────────────────────────
@@ -207,6 +424,7 @@ def run_tepai(params: dict[str, Any]) -> dict[str, np.ndarray]:
 _RUNNERS = {
     "trotter": run_trotter,
     "tepai": run_tepai,
+    "snapshot": run_snapshot,
 }
 
 
