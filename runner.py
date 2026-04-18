@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> None:
             log.info("  ✓ Cached data found — skipping computation.")
             if args.dry_run:
                 continue
-            if exp_type != "snapshot":
+            if exp_type not in ("snapshot", "circuits"):
                 metadata, arrays = load_results(params)
                 _log_summary(arrays)
             continue
@@ -105,8 +105,8 @@ def main(argv: list[str] | None = None) -> None:
         elapsed = time.perf_counter() - t0
         log.info("  Done in %.1f s.", elapsed)
 
-        # Save results (snapshot saves its components internally in run_snapshot)
-        if exp_type != "snapshot":
+        # Save results (snapshot / circuits save their output internally)
+        if exp_type not in ("snapshot", "circuits"):
             saved_path = save_results(
                 params,
                 columns=list(arrays.keys()),

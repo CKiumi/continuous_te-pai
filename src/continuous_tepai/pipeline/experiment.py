@@ -419,12 +419,68 @@ def run_snapshot(params: dict[str, Any]) -> dict[str, np.ndarray]:
     }
 
 
+def run_circuits(params: dict[str, Any]) -> dict[str, Any]:
+    """Sample TE-PAI circuits at ``total_time`` and save them to CSV.
+
+    No backend execution; this is the "generate and dump" path used to
+    produce stratified-sampling inputs.  The output CSV lives in the
+    standard experiment data folder and is written via
+    :func:`circuit_io.save_circuits_csv`.
+    """
+    from ..te_pai import ContinuousTEPAI
+    from .cache import resolve_data_path
+    from .circuit_io import save_circuits_csv
+
+    ham = build_hamiltonian(params)
+    T = params["total_time"]
+    pod = params["pi_over_delta"]
+    delta = float(np.pi / pod)
+    n_circuits = params.get("n_circuits", 10)
+    seed = params.get("seed", 0)
+
+    log.info(
+        "    Circuits: n_qubits=%d, T=%.3f, Δ=π/%d, n_circuits=%d",
+        params["n_qubits"], T, pod, n_circuits,
+    )
+
+    sampler = ContinuousTEPAI(ham, delta=delta, total_time=T, seed=seed)
+    circuits = sampler.sample_circuits(n_circuits)
+
+    metadata = {
+        "type": "circuits",
+        "hamiltonian": params.get("hamiltonian", "spin_chain"),
+        "n_qubits": params["n_qubits"],
+        "total_time": T,
+        "pi_over_delta": pod,
+        "delta": delta,
+        "n_circuits": n_circuits,
+        "seed": seed,
+        "j": params["j"],
+        "time_dependent": bool(params.get("time_dependent", False)),
+        "initial_state": params.get("initial_state", ""),
+        "weight_prefactor": sampler.weight_prefactor,
+        "expected_gate_count": sampler.expected_gate_count,
+    }
+
+    path = resolve_data_path(params)
+    save_circuits_csv(path, circuits, metadata)
+
+    gate_counts = np.array([c.gate_count for c in circuits], dtype=int)
+    log.info(
+        "    [circuits] Saved %d circuits to %s (mean length %.1f)",
+        n_circuits, path, gate_counts.mean() if n_circuits else 0.0,
+    )
+
+    return {"circuits_path": str(path), "gate_counts": gate_counts}
+
+
 # ── main dispatch ───────────────────────────────────────────────────────
 
 _RUNNERS = {
     "trotter": run_trotter,
     "tepai": run_tepai,
     "snapshot": run_snapshot,
+    "circuits": run_circuits,
 }
 
 

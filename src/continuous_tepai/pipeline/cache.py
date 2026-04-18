@@ -118,13 +118,30 @@ def tepai_filename(params: dict[str, Any]) -> str:
     return name + ".csv"
 
 
+def circuits_filename(params: dict[str, Any]) -> str:
+    """Build the sampled-circuits filename.
+
+    Format: ``circuits_d{d}_S{n_circuits}_T{T}.csv``
+    """
+    pod = params["pi_over_delta"]
+    d = round(math.log2(pod))
+    if 2**d != pod:
+        raise ValueError(
+            f"pi_over_delta must be a power of 2, got {pod} "
+            f"(nearest: 2^{d} = {2**d})"
+        )
+    n_circuits = params.get("n_circuits", 1)
+    T = params["total_time"]
+    return f"circuits_d{d}_S{n_circuits}_T{_fmt(T)}.csv"
+
+
 # ── full path resolution ────────────────────────────────────────────────
 
 def resolve_data_path(params: dict[str, Any]) -> Path:
     """Return the full relative path for the experiment's cached data file.
 
     Combines :func:`experiment_folder_name` with the method-specific
-    filename (Trotter or TE-PAI).
+    filename (Trotter, TE-PAI, or raw circuits).
 
     For ``snapshot`` experiments the Trotter component path is returned
     for display/logging purposes; use :func:`is_cached` to check whether
@@ -136,6 +153,8 @@ def resolve_data_path(params: dict[str, Any]) -> Path:
         fname = trotter_filename(params)
     elif exp_type == "tepai":
         fname = tepai_filename(params)
+    elif exp_type == "circuits":
+        fname = circuits_filename(params)
     else:
         raise ValueError(f"Unknown experiment type {exp_type!r}")
     return DATA_ROOT / folder / fname
