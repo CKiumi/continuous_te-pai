@@ -108,3 +108,73 @@ def snapshot_comparison_plot(
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
     return output_path.resolve()
+
+
+def overhead_plot(
+    times: np.ndarray,
+    overheads_by_n: dict[int, np.ndarray],
+    *,
+    pi_over_delta: int,
+    j: float,
+    time_dependent: bool,
+    output_path: str | Path = "overhead.pdf",
+) -> Path:
+    r"""Plot TE-PAI overhead vs time for several qubit counts.
+
+    The overhead is :math:`\exp(2\,\|c\|_{1,\text{avg}}\,T\,\tan(\Delta/2))`
+    — the exponential prefactor on every sampled-circuit weight.
+
+    Parameters
+    ----------
+    times :
+        Time grid shared by all curves, shape ``(n_snapshots + 1,)``.
+    overheads_by_n :
+        Mapping ``n_qubits → overhead(t)`` array.
+    pi_over_delta :
+        The value :math:`\pi / \Delta` used (shown in the title).
+    j :
+        Coupling strength (shown in the title).
+    time_dependent :
+        Whether :math:`J(t)` is time-dependent (shown in the title).
+    output_path :
+        Where to save the PDF.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update(
+        {
+            "font.size": 16,
+            "axes.labelsize": 16,
+            "legend.fontsize": 13,
+            "lines.linewidth": 2.5,
+        }
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    qubit_counts = sorted(overheads_by_n.keys())
+    cmap = plt.get_cmap("viridis")
+    for idx, n in enumerate(qubit_counts):
+        color = cmap(idx / max(len(qubit_counts) - 1, 1))
+        ax.plot(times, overheads_by_n[n], label=f"n = {n}", color=color)
+
+    j_str = (
+        rf"$J(t)=\cos({j:g}\pi t)$" if time_dependent else rf"$J={j:g}$"
+    )
+    ax.set_title(
+        rf"TE-PAI overhead  —  $\Delta=\pi/{pi_over_delta}$, {j_str}"
+    )
+    ax.set_xlabel(r"Time $T$")
+    ax.set_ylabel(r"Overhead  $\exp(2\,\|c\|_{1,\mathrm{avg}}\,T\,\tan(\Delta/2))$")
+    ax.legend(title="Qubits")
+    ax.grid(alpha=0.3, which="both")
+    fig.tight_layout()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.resolve()

@@ -82,9 +82,8 @@ def main(argv: list[str] | None = None) -> None:
             log.info("  ✓ Cached data found — skipping computation.")
             if args.dry_run:
                 continue
-            if exp_type == "snapshot":
+            if exp_type in ("snapshot", "overhead"):
                 # Data is cached but the plot still needs to be produced.
-                # run_experiment loads from cache and calls snapshot_comparison_plot.
                 arrays = run_experiment(params)
                 _log_summary(arrays)
             elif exp_type not in ("circuits",):
@@ -110,8 +109,8 @@ def main(argv: list[str] | None = None) -> None:
         elapsed = time.perf_counter() - t0
         log.info("  Done in %.1f s.", elapsed)
 
-        # Save results (snapshot / circuits save their output internally)
-        if exp_type not in ("snapshot", "circuits"):
+        # Save results (snapshot / circuits / overhead save their output internally)
+        if exp_type not in ("snapshot", "circuits", "overhead"):
             saved_path = save_results(
                 params,
                 columns=list(arrays.keys()),

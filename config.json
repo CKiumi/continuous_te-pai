@@ -47,24 +47,37 @@
       "time_dependent": true,
       "n_qubits": 20,
       "j": 100,
-      "N": 500,
+      "N": 2000,
       "dt": 0.1,
-      "total_time": 0.5,
+      "total_time": 2,
       "n_circuits": 1000,
       "pi_over_delta": 1024,
       "type": "snapshot",
       "note": "Replicates snapshot.ipynb: 20-qubit spin chain, J(t)=cos(100πt)"
     },
     {
-      "name": "circuits_4q",
+      "name": "circuits_50q",
       "active": false,
       "type": "circuits",
-      "n_qubits": 4,
+      "n_qubits": 50,
       "n_circuits": 10,
       "total_time": 1.0,
+      "pi_over_delta": 128,
       "time_dependent": true,
       "j": 100,
-      "note": "Generate and save 10 TE-PAI circuits for 4 qubits"
+      "note": "Generate and save 10 TE-PAI circuits for 50 qubits"
+    },
+    {
+      "name": "overhead_sweep",
+      "active": false,
+      "type": "overhead",
+      "qubit_list": [6, 10, 15, 20, 30, 50, 100],
+      "j": 100,
+      "time_dependent": true,
+      "total_time": 1.0,
+      "dt": 0.05,
+      "pi_over_delta": 128,
+      "note": "Overhead exp(2 ||c||_1_avg T tan(Δ/2)) vs T for several qubit counts"
     }
   ]
 }

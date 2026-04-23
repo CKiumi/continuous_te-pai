@@ -135,6 +135,28 @@ def circuits_filename(params: dict[str, Any]) -> str:
     return f"circuits_d{d}_S{n_circuits}_T{_fmt(T)}.csv"
 
 
+def overhead_folder_name(params: dict[str, Any]) -> str:
+    """Build the folder name for overhead sweeps (no ``n_qubits``)."""
+    j = params["j"]
+    td = int(bool(params.get("time_dependent", False)))
+    T = params["total_time"]
+    dT = params["dt"]
+    return f"overhead_J{_fmt(j)}_td{td}_T{_fmt(T)}_dT{_fmt(dT)}"
+
+
+def overhead_filename(params: dict[str, Any]) -> str:
+    """Build the overhead-sweep CSV filename: ``{name}_d{d}.csv``."""
+    pod = params["pi_over_delta"]
+    d = round(math.log2(pod))
+    if 2**d != pod:
+        raise ValueError(
+            f"pi_over_delta must be a power of 2, got {pod} "
+            f"(nearest: 2^{d} = {2**d})"
+        )
+    name = params.get("name", "overhead")
+    return f"{name}_d{d}.csv"
+
+
 # ── full path resolution ────────────────────────────────────────────────
 
 def resolve_data_path(params: dict[str, Any]) -> Path:
@@ -147,8 +169,10 @@ def resolve_data_path(params: dict[str, Any]) -> Path:
     for display/logging purposes; use :func:`is_cached` to check whether
     both components exist.
     """
-    folder = experiment_folder_name(params)
     exp_type = params.get("type", "")
+    if exp_type == "overhead":
+        return DATA_ROOT / overhead_folder_name(params) / overhead_filename(params)
+    folder = experiment_folder_name(params)
     if exp_type in ("trotter", "snapshot"):
         fname = trotter_filename(params)
     elif exp_type == "tepai":

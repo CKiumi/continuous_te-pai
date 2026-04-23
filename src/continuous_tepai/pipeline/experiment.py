@@ -258,6 +258,10 @@ def run_tepai(params: dict[str, Any]) -> dict[str, np.ndarray]:
     n_snapshots = round(T / dt)
     snap_times = np.linspace(0, T, n_snapshots + 1)
 
+    # Terminal overhead (at t = T) — upper bound for the whole run.
+    terminal_sampler = ContinuousTEPAI(ham, delta=delta, total_time=T, seed=seed)
+    terminal_overhead = terminal_sampler.weight_prefactor
+
     if use_mp:
         n_workers = _worker_count()
         log.info(
@@ -277,6 +281,11 @@ def run_tepai(params: dict[str, Any]) -> dict[str, np.ndarray]:
         )
         backend = get_backend(params)
 
+    log.info(
+        "    TE-PAI overhead at T=%.3f: exp(2‖c‖₁_avg·T·tan(Δ/2)) = %.4g",
+        T, terminal_overhead,
+    )
+
     # t = 0 measurement (no evolution)
     if use_mp:
         ev0 = pool.apply(_mp_eval_circuit, args=(([], obs, n, init),))
@@ -284,6 +293,7 @@ def run_tepai(params: dict[str, Any]) -> dict[str, np.ndarray]:
         ev0 = backend.expectation([], obs, n, initial_state=init)
     means = [ev0]
     stds = [0.0]
+    overheads = [1.0]  # t = 0: no evolution, overhead exp(0) = 1.
 
     try:
         for i, t_snap in enumerate(snap_times[1:], start=1):
@@ -306,10 +316,11 @@ def run_tepai(params: dict[str, Any]) -> dict[str, np.ndarray]:
 
             means.append(float(np.mean(values)))
             stds.append(float(np.std(values, ddof=1) / np.sqrt(n_circuits)))
+            overheads.append(float(sampler.weight_prefactor))
 
             log.info(
-                "      snap %d/%d (T=%.2f): ⟨O⟩ = %.4f ± %.4f",
-                i, n_snapshots, t_snap, means[-1], stds[-1],
+                "      snap %d/%d (T=%.2f): ⟨O⟩ = %.4f ± %.4f, overhead = %.4g",
+                i, n_snapshots, t_snap, means[-1], stds[-1], overheads[-1],
             )
     finally:
         if use_mp:
@@ -320,6 +331,7 @@ def run_tepai(params: dict[str, Any]) -> dict[str, np.ndarray]:
         "times": snap_times,
         "expectation_values": np.array(means),
         "std_errors": np.array(stds),
+        "overheads": np.array(overheads),
     }
 
 
@@ -373,17 +385,19 @@ def run_snapshot(params: dict[str, Any]) -> dict[str, np.ndarray]:
             "times": tepai_data["times"],
             "expectation_values": tepai_data["expectation_values"],
             "std_errors": tepai_data["std_errors"],
+            "overheads": tepai_data["overheads"],
         }
     else:
         log.info("    [snapshot] Running TE-PAI estimate …")
         tepai_out = run_tepai(params)
         save_results(
             tepai_params,
-            columns=["times", "expectation_values", "std_errors"],
+            columns=["times", "expectation_values", "std_errors", "overheads"],
             arrays=[
                 tepai_out["times"],
                 tepai_out["expectation_values"],
                 tepai_out["std_errors"],
+                tepai_out["overheads"],
             ],
         )
         log.info("    [snapshot] TE-PAI data saved.")
@@ -444,6 +458,11 @@ def run_circuits(params: dict[str, Any]) -> dict[str, Any]:
     )
 
     sampler = ContinuousTEPAI(ham, delta=delta, total_time=T, seed=seed)
+    log.info(
+        "    Circuits overhead: exp(2‖c‖₁_avg·T·tan(Δ/2)) = %.4g "
+        "(expected gate count Λ = %.2f)",
+        sampler.weight_prefactor, sampler.expected_gate_count,
+    )
     circuits = sampler.sample_circuits(n_circuits)
 
     metadata = {
@@ -474,6 +493,94 @@ def run_circuits(params: dict[str, Any]) -> dict[str, Any]:
     return {"circuits_path": str(path), "gate_counts": gate_counts}
 
 
+def run_overhead(params: dict[str, Any]) -> dict[str, np.ndarray]:
+    r"""Compute the TE-PAI overhead as a function of time for several qubit counts.
+
+    Overhead:
+        :math:`\exp(2\,\|c\|_{1,\text{avg}}(T)\,T\,\tan(\Delta/2))`
+
+    Required config keys beyond the usual ones:
+    * ``qubit_list`` — list of qubit counts to sweep.
+
+    Writes a CSV (one column per qubit count) and a PDF plot into
+    ``Data/overhead_.../{name}_d{d}.{csv,pdf}``.
+    """
+    from .cache import (
+        DATA_ROOT, overhead_folder_name, overhead_filename, save_csv,
+    )
+    from .plotting import overhead_plot
+
+    qubit_list = params.get("qubit_list")
+    if not qubit_list:
+        raise ValueError(
+            "Overhead experiments require 'qubit_list' — a list of qubit counts."
+        )
+    qubit_list = [int(n) for n in qubit_list]
+
+    T = params["total_time"]
+    dt = params["dt"]
+    pod = params["pi_over_delta"]
+    delta = float(np.pi / pod)
+    tan_half = float(np.tan(delta / 2.0))
+
+    n_snapshots = round(T / dt)
+    times = np.linspace(0, T, n_snapshots + 1)
+
+    log.info(
+        "    Overhead: qubits=%s, Δ=π/%d, n_snap=%d",
+        qubit_list, pod, n_snapshots,
+    )
+
+    overheads_by_n: dict[int, np.ndarray] = {}
+    for n in qubit_list:
+        ham = build_hamiltonian({**params, "n_qubits": n})
+        oh = np.empty_like(times)
+        oh[0] = 1.0
+        for i, t in enumerate(times[1:], start=1):
+            c1_avg = ham.l1_norm_avg(float(t))
+            oh[i] = float(np.exp(2.0 * c1_avg * float(t) * tan_half))
+        overheads_by_n[n] = oh
+        log.info("      n=%d: overhead(T=%.3f) = %.4g", n, T, oh[-1])
+
+    # ── save CSV + PDF ────────────────────────────────────────────
+    folder = DATA_ROOT / overhead_folder_name(params)
+    folder.mkdir(parents=True, exist_ok=True)
+    csv_path = folder / overhead_filename(params)
+    pdf_path = folder / (overhead_filename(params).removesuffix(".csv") + ".pdf")
+
+    columns = ["times"] + [f"q{n}" for n in qubit_list]
+    arrays = [times] + [overheads_by_n[n] for n in qubit_list]
+    metadata = {
+        "type": "overhead",
+        "hamiltonian": params.get("hamiltonian", "spin_chain"),
+        "qubit_list": ",".join(str(n) for n in qubit_list),
+        "j": params["j"],
+        "time_dependent": bool(params.get("time_dependent", False)),
+        "total_time": T,
+        "dt": dt,
+        "pi_over_delta": pod,
+        "delta": delta,
+        "seed": params.get("seed", 0),
+    }
+    save_csv(csv_path, metadata, columns, arrays)
+    log.info("    [overhead] Data saved to %s", csv_path)
+
+    overhead_plot(
+        times,
+        overheads_by_n,
+        pi_over_delta=pod,
+        j=float(params["j"]),
+        time_dependent=bool(params.get("time_dependent", False)),
+        output_path=pdf_path,
+    )
+    log.info("    [overhead] Plot saved to %s", pdf_path)
+
+    return {
+        "times": times,
+        **{f"q{n}": overheads_by_n[n] for n in qubit_list},
+    }
+
+
 # ── main dispatch ───────────────────────────────────────────────────────
 
 _RUNNERS = {
@@ -481,6 +588,7 @@ _RUNNERS = {
     "tepai": run_tepai,
     "snapshot": run_snapshot,
     "circuits": run_circuits,
+    "overhead": run_overhead,
 }
 
 
