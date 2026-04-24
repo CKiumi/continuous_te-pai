@@ -63,6 +63,14 @@ def _mp_eval_circuit(args: tuple) -> float:
     return _worker_backend.expectation(rotations, obs, n, initial_state=init)
 
 
+def _mp_eval_circuit_with_bond(args: tuple) -> tuple[float, int]:
+    """Pool worker: evaluate one circuit and also return MPS max-bond."""
+    rotations, obs, n, init = args
+    return _worker_backend.expectation_with_bond(
+        rotations, obs, n, initial_state=init,
+    )
+
+
 # ── helpers ─────────────────────────────────────────────────────────────
 
 def parse_observable(obs_str: str, n_qubits: int) -> PauliString:
@@ -433,6 +441,230 @@ def run_snapshot(params: dict[str, Any]) -> dict[str, np.ndarray]:
     }
 
 
+def run_bond_tracking(params: dict[str, Any]) -> dict[str, np.ndarray]:
+    r"""Track MPS bond dimension over time for both Trotter and TE-PAI.
+
+    Runs a Trotter reference and a Continuous TE-PAI estimate on the MPS
+    backend with a large (but finite) bond-dimension cap, and records the
+    quimb ``psi.max_bond()`` at every snapshot for both methods.  At each
+    snapshot the TE-PAI bond value is the maximum across all sampled
+    circuits at that time.
+
+    Produces a 2×1 subplot PDF — expectation values on top, MPS max-bond
+    on the bottom.
+
+    Only valid with ``backend = "mps"``.
+
+    Returns
+    -------
+    dict with ``times``, ``trotter_values``, ``trotter_bonds``,
+    ``tepai_mean``, ``tepai_std``, ``tepai_max_bond``, ``overheads``.
+    """
+    from .trotter import build_trotter_rotations, execute_trotter_mps_with_bonds
+    from .cache import (
+        DATA_ROOT, experiment_folder_name, resolve_data_path,
+        save_csv, save_results, load_results,
+    )
+    from .plotting import bond_tracking_plot
+    from ..te_pai import ContinuousTEPAI
+
+    if params.get("backend", "mps") != "mps":
+        raise ValueError(
+            "bond_tracking experiment requires backend='mps' "
+            f"(got {params.get('backend')!r})."
+        )
+
+    ham = build_hamiltonian(params)
+    n = params["n_qubits"]
+    T = params["total_time"]
+    dt = params["dt"]
+    N = params["N"]
+    depth = params.get("depth", 1)
+    pod = params["pi_over_delta"]
+    delta = float(np.pi / pod)
+    n_circuits = params.get("n_circuits", 32)
+    seed = params.get("seed", 0)
+    init = normalize_initial_state(params["initial_state"])
+    obs = parse_observable(params["observable"], n)
+    chi = params.get("max_bond")
+
+    n_snapshots = round(T / dt)
+    snap_times = np.linspace(0, T, n_snapshots + 1)
+
+    # ── short-circuit cache: reload the full CSV if it exists ─────
+    cache_path = resolve_data_path(params)
+    sidecar_path = cache_path.with_name(
+        cache_path.stem + "_finalbonds.csv"
+    )
+    if cache_path.exists() and sidecar_path.exists():
+        log.info("    [bond_tracking] Loading cached CSV …")
+        meta, data = load_results(params)
+        result = {
+            "times": data["times"],
+            "trotter_values": data["trotter_values"],
+            "trotter_bonds": data["trotter_bonds"].astype(int),
+            "tepai_mean": data["tepai_mean"],
+            "tepai_std": data["tepai_std"],
+            "tepai_max_bond": data["tepai_max_bond"].astype(int),
+            "overheads": data["overheads"],
+        }
+        trotter_gate_count = int(float(meta.get("trotter_gate_count", "0")))
+        tepai_avg_gate_count = float(meta.get("tepai_avg_gate_count", "nan"))
+        from .cache import load_csv
+        _, side = load_csv(sidecar_path)
+        tepai_final_bonds = side["max_bond"].astype(int)
+    else:
+        log.info(
+            "    BondTrack: n=%d, χ=%s, N=%d, depth=%d, Δ=π/%d, N_s=%d, n_snap=%d",
+            n, chi, N, depth, pod, n_circuits, n_snapshots,
+        )
+
+        # ── Trotter with bond tracking ────────────────────────────
+        log.info("    [bond_tracking] Trotter reference …")
+        rots = build_trotter_rotations(ham, T, N, n_snapshots, depth=depth)
+        trotter_gate_count = int(sum(len(r) for r in rots))
+        trotter_vals, trotter_bonds = execute_trotter_mps_with_bonds(
+            rots, obs, n, init, max_bond=chi,
+        )
+        log.info(
+            "    [bond_tracking] Trotter done; max bond across time = %d, "
+            "total gate count = %d",
+            int(trotter_bonds.max()), trotter_gate_count,
+        )
+
+        # ── TE-PAI with bond tracking ─────────────────────────────
+        n_workers = _worker_count()
+        log.info(
+            "    [bond_tracking] TE-PAI: Δ=π/%d, N_s=%d, workers=%d",
+            pod, n_circuits, n_workers,
+        )
+        ctx = mp.get_context("spawn" if platform.system() == "Darwin" else "fork")
+        pool = ctx.Pool(
+            n_workers,
+            initializer=_mp_init_backend,
+            initargs=(params,),
+        )
+
+        # t = 0 — no evolution
+        ev0, bond0 = pool.apply(
+            _mp_eval_circuit_with_bond, args=(([], obs, n, init),),
+        )
+        tepai_means = [float(ev0)]
+        tepai_stds = [0.0]
+        tepai_max_bonds = [int(bond0)]
+        overheads = [1.0]
+        tepai_gate_counts_final: list[int] = []
+        tepai_final_bonds_list: list[int] = []
+
+        try:
+            for i, t_snap in enumerate(snap_times[1:], start=1):
+                sampler = ContinuousTEPAI(
+                    ham, delta=delta, total_time=t_snap, seed=seed + i,
+                )
+                circuits = sampler.sample_circuits(n_circuits)
+                tasks = [(c.rotations, obs, n, init) for c in circuits]
+                raw = pool.map(_mp_eval_circuit_with_bond, tasks)
+                evs = np.array([v for v, _ in raw])
+                bonds = np.array([b for _, b in raw], dtype=int)
+                values = np.array([c.weight * v for c, v in zip(circuits, evs)])
+
+                tepai_means.append(float(np.mean(values)))
+                tepai_stds.append(float(np.std(values, ddof=1) / np.sqrt(n_circuits)))
+                tepai_max_bonds.append(int(bonds.max()))
+                overheads.append(float(sampler.weight_prefactor))
+                if i == n_snapshots:
+                    tepai_gate_counts_final = [c.gate_count for c in circuits]
+                    tepai_final_bonds_list = [int(b) for b in bonds]
+
+                log.info(
+                    "      snap %d/%d (T=%.2f): ⟨O⟩ = %.4f ± %.4f, "
+                    "max χ over %d circuits = %d",
+                    i, n_snapshots, t_snap,
+                    tepai_means[-1], tepai_stds[-1],
+                    n_circuits, tepai_max_bonds[-1],
+                )
+        finally:
+            pool.close()
+            pool.join()
+
+        tepai_avg_gate_count = (
+            float(np.mean(tepai_gate_counts_final))
+            if tepai_gate_counts_final else float("nan")
+        )
+        tepai_final_bonds = np.array(tepai_final_bonds_list, dtype=int)
+
+        result = {
+            "times": snap_times,
+            "trotter_values": trotter_vals,
+            "trotter_bonds": np.asarray(trotter_bonds, dtype=int),
+            "tepai_mean": np.array(tepai_means),
+            "tepai_std": np.array(tepai_stds),
+            "tepai_max_bond": np.array(tepai_max_bonds, dtype=int),
+            "overheads": np.array(overheads),
+        }
+
+        # ── save CSV ──────────────────────────────────────────────
+        metadata = {
+            **params,
+            "trotter_gate_count": trotter_gate_count,
+            "tepai_avg_gate_count": tepai_avg_gate_count,
+        }
+        save_results(
+            params,
+            columns=[
+                "times", "trotter_values", "trotter_bonds",
+                "tepai_mean", "tepai_std", "tepai_max_bond", "overheads",
+            ],
+            arrays=[
+                result["times"],
+                result["trotter_values"],
+                result["trotter_bonds"],
+                result["tepai_mean"],
+                result["tepai_std"],
+                result["tepai_max_bond"],
+                result["overheads"],
+            ],
+            metadata=metadata,
+        )
+        log.info("    [bond_tracking] Data saved to %s", cache_path)
+
+        # Sidecar: per-circuit max-bond at the final snapshot (for the histogram).
+        save_csv(
+            sidecar_path,
+            metadata={"snapshot_time": T, "n_circuits": n_circuits},
+            columns=["max_bond"],
+            arrays=[tepai_final_bonds],
+        )
+        log.info("    [bond_tracking] Final-bond histogram saved to %s", sidecar_path)
+
+    # ── PDF plot (always regenerated) ─────────────────────────────
+    exp_name = params.get("name", "bond_tracking")
+    folder = DATA_ROOT / experiment_folder_name(params)
+    folder.mkdir(parents=True, exist_ok=True)
+    plot_path = folder / f"{exp_name}.pdf"
+
+    bond_tracking_plot(
+        result["times"],
+        result["trotter_values"],
+        result["tepai_mean"],
+        result["tepai_std"],
+        result["trotter_bonds"],
+        result["tepai_max_bond"],
+        n_qubits=n,
+        observable_str=params["observable"],
+        n_circuits=n_circuits,
+        max_bond_cap=chi,
+        trotter_gate_count=trotter_gate_count,
+        tepai_avg_gate_count=tepai_avg_gate_count,
+        trotter_final_bond=int(result["trotter_bonds"][-1]),
+        tepai_final_bonds=tepai_final_bonds,
+        output_path=plot_path,
+    )
+    log.info("    [bond_tracking] Plot saved to %s", plot_path)
+
+    return result
+
+
 def run_circuits(params: dict[str, Any]) -> dict[str, Any]:
     """Sample TE-PAI circuits at ``total_time`` and save them to CSV.
 
@@ -589,6 +821,7 @@ _RUNNERS = {
     "snapshot": run_snapshot,
     "circuits": run_circuits,
     "overhead": run_overhead,
+    "bond_tracking": run_bond_tracking,
 }
 
 

@@ -147,6 +147,39 @@ def execute_trotter_mps(
     return np.array(results)
 
 
+def execute_trotter_mps_with_bonds(
+    rotations_per_snapshot: list[list[PauliRotation]],
+    observable: PauliString,
+    n_qubits: int,
+    initial_state: str,
+    *,
+    max_bond: int | None = None,
+    cutoff: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Trotter MPS execution that also records the MPS max-bond at each snapshot.
+
+    Returns
+    -------
+    (expectation_values, max_bonds)
+        Both arrays have shape ``(n_snapshots + 1,)``.  Entry 0 is the
+        measurement / bond on the initial state.
+    """
+    from ..backends.mps_backend import MPSBackend, _non_identity_sites
+
+    be = MPSBackend(max_bond=max_bond, cutoff=cutoff)
+    circ = be._make_circuit(n_qubits, initial_state)
+    sites = _non_identity_sites(observable.label)
+
+    evs = [be._pauli_string_expectation(circ.psi, sites)]
+    bonds = [int(circ.psi.max_bond())]
+    for snap_rots in rotations_per_snapshot:
+        for rot in snap_rots:
+            be._apply_rotation(circ, rot)
+        evs.append(be._pauli_string_expectation(circ.psi, sites))
+        bonds.append(int(circ.psi.max_bond()))
+    return np.array(evs), np.array(bonds, dtype=int)
+
+
 def execute_trotter_generic(
     rotations_per_snapshot: list[list[PauliRotation]],
     observable: PauliString,

@@ -186,3 +186,19 @@ class MPSBackend:
 
         sites = _non_identity_sites(observable.label)
         return self._pauli_string_expectation(circ.psi, sites)
+
+    def expectation_with_bond(
+        self,
+        rotations: Sequence[PauliRotation],
+        observable: PauliString,
+        num_qubits: int,
+        *,
+        initial_state: str = "zero",
+    ) -> tuple[float, int]:
+        """Like :meth:`expectation`, but also returns the MPS max bond dim."""
+        circ = self._make_circuit(num_qubits, initial_state)
+        for rot in rotations:
+            self._apply_rotation(circ, rot)
+        sites = _non_identity_sites(observable.label)
+        ev = self._pauli_string_expectation(circ.psi, sites)
+        return ev, int(circ.psi.max_bond())

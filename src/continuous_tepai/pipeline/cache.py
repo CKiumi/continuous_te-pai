@@ -135,6 +135,30 @@ def circuits_filename(params: dict[str, Any]) -> str:
     return f"circuits_d{d}_S{n_circuits}_T{_fmt(T)}.csv"
 
 
+def bond_tracking_filename(params: dict[str, Any]) -> str:
+    """Build the filename for bond-tracking experiments.
+
+    Format: ``bond_trotter{order}_N{N}_depth{depth}_d{d}_S{S}[_chi{chi}].csv``
+    Combines Trotter and TE-PAI parameters since both are run together.
+    """
+    order = params.get("trotter_order", 1)
+    N = params["N"]
+    depth = params.get("depth", 1)
+    pod = params["pi_over_delta"]
+    d = round(math.log2(pod))
+    if 2**d != pod:
+        raise ValueError(
+            f"pi_over_delta must be a power of 2, got {pod} "
+            f"(nearest: 2^{d} = {2**d})"
+        )
+    n_circuits = params.get("n_circuits", 1)
+    chi = params.get("max_bond")
+    name = f"bond_trotter{order}_N{N}_depth{depth}_d{d}_S{n_circuits}"
+    if chi is not None:
+        name += f"_chi{chi}"
+    return name + ".csv"
+
+
 def overhead_folder_name(params: dict[str, Any]) -> str:
     """Build the folder name for overhead sweeps (no ``n_qubits``)."""
     j = params["j"]
@@ -179,6 +203,8 @@ def resolve_data_path(params: dict[str, Any]) -> Path:
         fname = tepai_filename(params)
     elif exp_type == "circuits":
         fname = circuits_filename(params)
+    elif exp_type == "bond_tracking":
+        fname = bond_tracking_filename(params)
     else:
         raise ValueError(f"Unknown experiment type {exp_type!r}")
     return DATA_ROOT / folder / fname

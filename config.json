@@ -43,7 +43,7 @@
     },
     {
       "name": "snapshot_20q",
-      "active": true,
+      "active": false,
       "time_dependent": true,
       "n_qubits": 20,
       "j": 100,
@@ -66,6 +66,23 @@
       "time_dependent": true,
       "j": 100,
       "note": "Generate and save 10 TE-PAI circuits for 50 qubits"
+    },
+    {
+      "name": "bond_tracking_q12_J1_T2",
+      "active": true,
+      "type": "bond_tracking",
+      "n_qubits": 12,
+      "j": 1,
+      "time_dependent": true,
+      "total_time": 2.0,
+      "dt": 0.2,
+      "N": 2000,
+      "pi_over_delta":  256,
+      "n_circuits": 1000,
+      "max_bond": 64,
+      "observable": "X0",
+      "initial_state": "plus",
+      "note": "Small 12-qubit bond-tracking test: χ cap 64, 500 TE-PAI circuits per snapshot"
     },
     {
       "name": "overhead_sweep",
